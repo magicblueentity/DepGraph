@@ -58,6 +58,15 @@ qt_add_executable(DepGraph WIN32 MACOSX_BUNDLE ${APP_SOURCES})
 
 target_include_directories(DepGraph PRIVATE src)
 
+# MinGW: GCC invokes binutils (e.g. `as`) by name, so it must be discoverable.
+# Adding `-B <mingw-bin>` makes GCC search that directory for helper programs
+# even if PATH is missing/changed between configure/build shells.
+if (MINGW)
+  get_filename_component(_mingw_bin_dir "${CMAKE_CXX_COMPILER}" DIRECTORY)
+  target_compile_options(DepGraph PRIVATE "-B${_mingw_bin_dir}/")
+  target_link_options(DepGraph PRIVATE "-B${_mingw_bin_dir}/")
+endif()
+
 target_link_libraries(DepGraph PRIVATE
   Qt6::Widgets
   Qt6::Svg
@@ -72,4 +81,3 @@ if (MSVC)
 else()
   target_compile_options(DepGraph PRIVATE -Wall -Wextra -Wpedantic)
 endif()
-

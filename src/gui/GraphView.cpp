@@ -2,10 +2,14 @@
 
 #include <QGraphicsScene>
 #include <QGraphicsDropShadowEffect>
+#include <QGraphicsSceneMouseEvent>
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QPainter>
+#include <QRandomGenerator>
+#include <QScrollBar>
 #include <QSvgGenerator>
+#include <QQueue>
 #include <QtMath>
 
 class GraphView::NodeItem : public QGraphicsObject {
@@ -18,10 +22,10 @@ public:
         setAcceptHoverEvents(true);
         setCacheMode(DeviceCoordinateCache);
 
-        // deterministic initial scatter
-        qsrand(uint(n.id * 2654435761u));
-        qreal x = (qrand() % 400) - 200;
-        qreal y = (qrand() % 260) - 130;
+        // deterministic initial scatter (qrand/qsrand were removed in Qt 6)
+        QRandomGenerator rng(quint32(n.id * 2654435761u));
+        qreal x = (rng.bounded(400)) - 200;
+        qreal y = (rng.bounded(260)) - 130;
         setPos(x, y);
     }
 

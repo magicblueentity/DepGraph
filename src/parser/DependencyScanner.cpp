@@ -39,7 +39,7 @@ static bool parseRequirementsTxt(const QString& filePath, ParsedDeps* out, QStri
             continue;
 
         // Basic: name==version, name>=version, name
-        QRegularExpression re("^([A-Za-z0-9_.-]+)\s*(==|>=|<=|~=|>|<)?\s*([^;\s]+)?");
+        QRegularExpression re(R"(^([A-Za-z0-9_.-]+)\s*(==|>=|<=|~=|>|<)?\s*([^;\s]+)?)");
         auto m = re.match(line);
         if (!m.hasMatch())
             continue;
