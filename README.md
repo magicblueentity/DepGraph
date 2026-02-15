@@ -1,7 +1,7 @@
 DepGraph
 =======
 
-Qt6 desktop app that scans a repository folder for dependency manifests and renders a dependency graph.
+Qt6 desktop app that scans a repository folder for dependency manifests and renders a dependency graph I made in like 3 hours so don't expect it to be perfect.
 
 Supported inputs (best-effort parsing)
 - `package.json` (npm)
@@ -23,4 +23,14 @@ cmake --build build --config Release
 ```
 
 Run
-- Windows: run `build\Release\DepGraph.exe` (or `build\Debug\DepGraph.exe`)
+- Windows (MSVC): run `build\Release\DepGraph.exe` (or `build\Debug\DepGraph.exe`)
+- Windows (Qt MinGW kit): you must have Qt runtime DLLs on PATH, or deploy them next to the exe:
+
+```powershell
+# Run from build tree (MinGW)
+$env:Path = "C:\Qt\6.10.2\mingw_64\bin;C:\Qt\Tools\mingw1310_64\bin;$env:Path"
+.\build-mingw\DepGraph.exe
+
+# Deploy (copies Qt DLLs + plugins next to DepGraph.exe)
+C:\Qt\6.10.2\mingw_64\bin\windeployqt.exe .\build-mingw\DepGraph.exe
+```

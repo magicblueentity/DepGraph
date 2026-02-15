@@ -3,6 +3,7 @@
 #include <QGraphicsScene>
 #include <QGraphicsDropShadowEffect>
 #include <QGraphicsSceneMouseEvent>
+#include <QKeyEvent>
 #include <QMouseEvent>
 #include <QWheelEvent>
 #include <QPainter>
@@ -10,6 +11,7 @@
 #include <QScrollBar>
 #include <QSvgGenerator>
 #include <QQueue>
+#include <QSet>
 #include <QtMath>
 
 class GraphView::NodeItem : public QGraphicsObject {
@@ -20,7 +22,8 @@ public:
     {
         setFlags(ItemIsMovable | ItemSendsGeometryChanges | ItemIsSelectable);
         setAcceptHoverEvents(true);
-        setCacheMode(DeviceCoordinateCache);
+        // Nodes move a lot during layout; caching tends to look "laggy"/smeary.
+        setCacheMode(NoCache);
 
         // deterministic initial scatter (qrand/qsrand were removed in Qt 6)
         QRandomGenerator rng(quint32(n.id * 2654435761u));
@@ -108,8 +111,8 @@ protected:
     QVariant itemChange(GraphicsItemChange change, const QVariant& value) override
     {
         if (change == ItemPositionHasChanged) {
-            // keep velocity mild when user drags
-            velocity *= 0.2;
+            if (m_owner)
+                m_owner->updateEdges();
         }
         return QGraphicsObject::itemChange(change, value);
     }
@@ -128,43 +131,24 @@ public:
         : m_a(a), m_b(b)
     {
         setZValue(-10);
-        setCacheMode(DeviceCoordinateCache);
+        setCacheMode(NoCache);
     }
 
     QRectF boundingRect() const override
     {
-        QPointF p1 = m_a->pos();
-        QPointF p2 = m_b->pos();
-        QRectF r(p1, p2);
-        r = r.normalized();
-        r.adjust(-40, -40, 40, 40);
-        return r;
+        return m_cachedRect;
     }
 
     void paint(QPainter* p, const QStyleOptionGraphicsItem*, QWidget*) override
     {
         p->setRenderHint(QPainter::Antialiasing, true);
-        QPointF p1 = m_a->pos();
-        QPointF p2 = m_b->pos();
-
-        // Curved edge with subtle glow
-        QPainterPath path;
-        QPointF mid = (p1 + p2) * 0.5;
-        QPointF d = p2 - p1;
-        QPointF n(-d.y(), d.x());
-        if (!n.isNull()) n /= std::sqrt(QPointF::dotProduct(n, n));
-        qreal bend = qBound(-60.0, std::sqrt(QPointF::dotProduct(d, d)) * 0.10, 60.0);
-        QPointF c = mid + n * bend;
-        path.moveTo(p1);
-        path.quadTo(c, p2);
-
         QPen pen(QColor(120, 170, 255, 60), 1.4);
         p->setPen(pen);
-        p->drawPath(path);
+        p->drawPath(m_cachedPath);
 
         // arrow head near target
-        QPointF t = path.pointAtPercent(0.93);
-        QPointF t2 = path.pointAtPercent(0.96);
+        QPointF t = m_cachedPath.pointAtPercent(0.93);
+        QPointF t2 = m_cachedPath.pointAtPercent(0.96);
         QPointF dir = (t2 - t);
         if (!dir.isNull()) {
             dir /= std::sqrt(QPointF::dotProduct(dir, dir));
@@ -179,9 +163,42 @@ public:
         }
     }
 
+    void syncGeometry()
+    {
+        if (!m_a || !m_b)
+            return;
+
+        const QPointF p1 = m_a->pos();
+        const QPointF p2 = m_b->pos();
+
+        // Curved edge
+        QPainterPath path;
+        QPointF mid = (p1 + p2) * 0.5;
+        QPointF d = p2 - p1;
+        QPointF n(-d.y(), d.x());
+        const qreal nlen = std::sqrt(QPointF::dotProduct(n, n));
+        if (nlen > 1e-6)
+            n /= nlen;
+
+        const qreal dist = std::sqrt(QPointF::dotProduct(d, d));
+        const qreal bend = qBound(-60.0, dist * 0.10, 60.0);
+        const QPointF c = mid + n * bend;
+        path.moveTo(p1);
+        path.quadTo(c, p2);
+
+        const QRectF nr = path.boundingRect().adjusted(-45, -45, 45, 45);
+        if (nr != m_cachedRect) {
+            prepareGeometryChange();
+            m_cachedRect = nr;
+        }
+        m_cachedPath = path;
+    }
+
 private:
     NodeItem* m_a;
     NodeItem* m_b;
+    QPainterPath m_cachedPath;
+    QRectF m_cachedRect;
 };
 
 GraphView::GraphView(QWidget* parent)
@@ -191,14 +208,12 @@ GraphView::GraphView(QWidget* parent)
     setScene(m_scene);
 
     setRenderHints(QPainter::Antialiasing | QPainter::TextAntialiasing | QPainter::SmoothPixmapTransform);
-    setViewportUpdateMode(QGraphicsView::FullViewportUpdate);
+    setViewportUpdateMode(QGraphicsView::SmartViewportUpdate);
     setTransformationAnchor(QGraphicsView::AnchorUnderMouse);
     setDragMode(QGraphicsView::NoDrag);
+    setOptimizationFlags(QGraphicsView::DontSavePainterState | QGraphicsView::DontAdjustForAntialiasing);
 
     setBackgroundBrush(QBrush(QColor(8, 12, 18)));
-
-    connect(&m_layoutTimer, &QTimer::timeout, this, &GraphView::tickLayout);
-    m_layoutTimer.start(16); // ~60fps
 }
 
 QColor GraphView::colorForStatus(NodeStatus s) const
@@ -257,7 +272,63 @@ void GraphView::rebuildScene()
         m_edgeItems.push_back(edge);
     }
 
+    applyInitialLayout();
+    updateEdges();
     fitInitial();
+}
+
+void GraphView::applyInitialLayout()
+{
+    if (!m_model || m_nodeItems.isEmpty())
+        return;
+
+    // Deterministic layered layout from the repo root (node 0). This is fast and stable.
+    const int rootId = 0;
+
+    QHash<int, int> depth;
+    QQueue<int> q;
+    depth.insert(rootId, 0);
+    q.enqueue(rootId);
+
+    while (!q.isEmpty()) {
+        int cur = q.dequeue();
+        const int d = depth.value(cur);
+        for (int to : m_model->outgoing(cur)) {
+            if (depth.contains(to))
+                continue;
+            depth.insert(to, d + 1);
+            q.enqueue(to);
+        }
+    }
+
+    // Group nodes by depth. Unreachable nodes go to the last column.
+    int maxDepth = 0;
+    for (auto it = depth.begin(); it != depth.end(); ++it)
+        maxDepth = qMax(maxDepth, it.value());
+
+    QVector<QVector<int>> cols(maxDepth + 2);
+    const int unreachableCol = maxDepth + 1;
+
+    for (const Node& n : m_model->nodes()) {
+        const int d = depth.contains(n.id) ? depth.value(n.id) : unreachableCol;
+        cols[d].push_back(n.id);
+    }
+
+    const qreal xStep = 360.0;
+    const qreal yStep = 92.0;
+
+    for (int d = 0; d < cols.size(); d++) {
+        auto& v = cols[d];
+        std::sort(v.begin(), v.end());
+        const qreal x = (d - 0) * xStep;
+        const qreal y0 = -0.5 * (qMax(1, v.size()) - 1) * yStep;
+
+        for (int i = 0; i < v.size(); i++) {
+            if (auto* item = m_nodeItems.value(v[i], nullptr)) {
+                item->setPos(QPointF(x, y0 + i * yStep));
+            }
+        }
+    }
 }
 
 void GraphView::fitInitial()
@@ -269,97 +340,18 @@ void GraphView::fitInitial()
     r.adjust(-120, -120, 120, 120);
     m_scene->setSceneRect(r);
     fitInView(r, Qt::KeepAspectRatio);
-}
-
-void GraphView::tickLayout()
-{
-    if (!m_model || m_nodeItems.isEmpty())
-        return;
-
-    // Force-directed layout (basic but smooth):
-    // - repulsion between nodes
-    // - spring along edges
-    // - mild centering
-
-    const qreal repulsion = 22000.0;
-    const qreal spring = 0.0048;
-    const qreal desired = 160.0;
-    const qreal damping = 0.85;
-    const qreal maxStep = 12.0;
-
-    QVector<NodeItem*> items;
-    items.reserve(m_nodeItems.size());
-    for (auto* it : m_nodeItems)
-        items.push_back(it);
-
-    // Repulsion
-    for (int i = 0; i < items.size(); i++) {
-        for (int j = i + 1; j < items.size(); j++) {
-            NodeItem* a = items[i];
-            NodeItem* b = items[j];
-            QPointF d = b->pos() - a->pos();
-            qreal dist2 = QPointF::dotProduct(d, d) + 20.0;
-            qreal f = repulsion / dist2;
-            QPointF dir = d / std::sqrt(dist2);
-            a->velocity -= dir * f;
-            b->velocity += dir * f;
-        }
-    }
-
-    // Springs along edges
-    for (const Edge& e : m_model->edges()) {
-        NodeItem* a = m_nodeItems.value(e.from, nullptr);
-        NodeItem* b = m_nodeItems.value(e.to, nullptr);
-        if (!a || !b)
-            continue;
-        QPointF d = b->pos() - a->pos();
-        qreal dist = std::sqrt(QPointF::dotProduct(d, d) + 1.0);
-        QPointF dir = d / dist;
-        qreal stretch = dist - desired;
-        QPointF f = dir * (stretch * spring * 1000.0);
-        a->velocity += f;
-        b->velocity -= f;
-    }
-
-    // Centering
-    for (auto* a : items) {
-        QPointF toCenter = -a->pos();
-        a->velocity += toCenter * 0.0009;
-    }
-
-    // Integrate
-    for (auto* a : items) {
-        if (a->isSelected()) {
-            // user is likely dragging
-            a->velocity *= 0.2;
-            continue;
-        }
-
-        a->velocity *= damping;
-        QPointF step = a->velocity;
-        qreal len = std::sqrt(QPointF::dotProduct(step, step));
-        if (len > maxStep)
-            step = step / len * maxStep;
-        a->setPos(a->pos() + step);
-    }
-
-    // Expand scene rect gradually to follow nodes
-    QRectF r;
-    for (auto* ni : m_nodeItems)
-        r |= ni->sceneBoundingRect();
-    if (!r.isNull()) {
-        r.adjust(-160, -160, 160, 160);
-        m_scene->setSceneRect(r);
-    }
-
-    // Edges are QGraphicsItem; they update via boundingRect recompute
-    for (auto* e : m_edgeItems)
-        e->update();
+    m_zoom = 1.0;
 }
 
 void GraphView::wheelEvent(QWheelEvent* e)
 {
-    const qreal factor = std::pow(1.0015, e->angleDelta().y());
+    const qreal factor = std::pow(1.0012, e->angleDelta().y());
+    const qreal next = m_zoom * factor;
+    if (next < 0.12 || next > 5.0) {
+        e->accept();
+        return;
+    }
+    m_zoom = next;
     scale(factor, factor);
 }
 
@@ -399,6 +391,16 @@ void GraphView::mouseReleaseEvent(QMouseEvent* e)
     QGraphicsView::mouseReleaseEvent(e);
 }
 
+void GraphView::keyPressEvent(QKeyEvent* e)
+{
+    if (e->key() == Qt::Key_F) {
+        fitToContents();
+        e->accept();
+        return;
+    }
+    QGraphicsView::keyPressEvent(e);
+}
+
 void GraphView::focusNode(int nodeId)
 {
     auto* ni = m_nodeItems.value(nodeId, nullptr);
@@ -406,6 +408,31 @@ void GraphView::focusNode(int nodeId)
         return;
     centerOn(ni);
     ni->setSelected(true);
+}
+
+void GraphView::fitToContents()
+{
+    QRectF r = m_scene->itemsBoundingRect();
+    if (r.isNull())
+        return;
+    r.adjust(-120, -120, 120, 120);
+    m_scene->setSceneRect(r);
+    fitInView(r, Qt::KeepAspectRatio);
+    m_zoom = 1.0;
+}
+
+void GraphView::resetView()
+{
+    resetTransform();
+    m_zoom = 1.0;
+    fitToContents();
+}
+
+void GraphView::relayout()
+{
+    applyInitialLayout();
+    updateEdges();
+    fitToContents();
 }
 
 void GraphView::highlightImpactFrom(int nodeId)
@@ -472,6 +499,12 @@ void GraphView::exportSvg(const QString& filePath)
     p.fillRect(r, QColor(8, 12, 18));
     m_scene->render(&p);
     p.end();
+}
+
+void GraphView::updateEdges()
+{
+    for (auto* e : m_edgeItems)
+        e->syncGeometry();
 }
 
 #include "GraphView.moc"

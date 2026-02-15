@@ -145,6 +145,5 @@ bool DependencyScanner::scanRepositoryToGraph(const QDir& repoDir, GraphModel* g
         }
     }
 
-    emit graph->changed();
     return true;
 }

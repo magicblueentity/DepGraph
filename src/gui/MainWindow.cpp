@@ -14,6 +14,8 @@
 #include <QToolBar>
 #include <QVBoxLayout>
 #include <QSaveFile>
+#include <QtConcurrent/QtConcurrentRun>
+#include <QDate>
 
 #include "gui/GraphView.h"
 #include "parser/DependencyScanner.h"
@@ -46,6 +48,23 @@ MainWindow::MainWindow(QWidget* parent)
     connect(m_view, &GraphView::nodeSelected, this, &MainWindow::onNodeSelected);
     connect(&m_graph, &GraphModel::changed, this, &MainWindow::repopulateNodeList);
 
+    connect(&m_scanWatcher, &QFutureWatcher<GraphModel::Data>::finished, this, [this]() {
+        const GraphModel::Data result = m_scanWatcher.result();
+        m_graph.replaceFromData(result);
+        setBusy(false, "Scan complete.");
+
+        const int nNodes = m_graph.nodes().size();
+        const int nEdges = m_graph.edges().size();
+
+        m_status->setText(QString("Repo: %1\nNodes: %2   Edges: %3")
+                              .arg(m_repoDir.absolutePath())
+                              .arg(nNodes)
+                              .arg(nEdges));
+
+        statusBar()->showMessage(QString("Scan complete. %1 nodes, %2 edges.").arg(nNodes).arg(nEdges), 3500);
+        applyFilter();
+    });
+
     statusBar()->showMessage("Open a folder or clone a repo to scan dependencies.");
 }
 
@@ -56,52 +75,71 @@ void MainWindow::buildUi()
     auto* tb = addToolBar("Main");
     tb->setMovable(false);
 
-    auto* actOpen = new QAction("Open Folder", this);
-    connect(actOpen, &QAction::triggered, this, &MainWindow::openLocalFolder);
-    tb->addAction(actOpen);
+    m_actOpen = new QAction("Open Folder", this);
+    connect(m_actOpen, &QAction::triggered, this, &MainWindow::openLocalFolder);
+    tb->addAction(m_actOpen);
 
-    auto* actClone = new QAction("Clone GitHub", this);
-    connect(actClone, &QAction::triggered, this, &MainWindow::cloneFromGitHub);
-    tb->addAction(actClone);
-
-    tb->addSeparator();
-
-    auto* actRescan = new QAction("Rescan", this);
-    connect(actRescan, &QAction::triggered, this, &MainWindow::rescan);
-    tb->addAction(actRescan);
+    m_actClone = new QAction("Clone GitHub", this);
+    connect(m_actClone, &QAction::triggered, this, &MainWindow::cloneFromGitHub);
+    tb->addAction(m_actClone);
 
     tb->addSeparator();
 
-    auto* actJson = new QAction("Export JSON", this);
-    connect(actJson, &QAction::triggered, this, &MainWindow::exportJson);
-    tb->addAction(actJson);
+    m_actRescan = new QAction("Rescan", this);
+    connect(m_actRescan, &QAction::triggered, this, &MainWindow::rescan);
+    tb->addAction(m_actRescan);
 
-    auto* actCsv = new QAction("Export CSV", this);
-    connect(actCsv, &QAction::triggered, this, &MainWindow::exportCsv);
-    tb->addAction(actCsv);
+    tb->addSeparator();
 
-    auto* actPng = new QAction("Export PNG", this);
-    connect(actPng, &QAction::triggered, this, &MainWindow::exportPng);
-    tb->addAction(actPng);
+    auto* actRelayout = new QAction("Relayout", this);
+    connect(actRelayout, &QAction::triggered, m_view, &GraphView::relayout);
+    tb->addAction(actRelayout);
 
-    auto* actSvg = new QAction("Export SVG", this);
-    connect(actSvg, &QAction::triggered, this, &MainWindow::exportSvg);
-    tb->addAction(actSvg);
+    auto* actFit = new QAction("Fit", this);
+    connect(actFit, &QAction::triggered, m_view, &GraphView::fitToContents);
+    tb->addAction(actFit);
+
+    auto* actResetView = new QAction("Reset View", this);
+    connect(actResetView, &QAction::triggered, m_view, &GraphView::resetView);
+    tb->addAction(actResetView);
+
+    tb->addSeparator();
+
+    m_actJson = new QAction("Export JSON", this);
+    connect(m_actJson, &QAction::triggered, this, &MainWindow::exportJson);
+    tb->addAction(m_actJson);
+
+    m_actCsv = new QAction("Export CSV", this);
+    connect(m_actCsv, &QAction::triggered, this, &MainWindow::exportCsv);
+    tb->addAction(m_actCsv);
+
+    m_actPng = new QAction("Export PNG", this);
+    connect(m_actPng, &QAction::triggered, this, &MainWindow::exportPng);
+    tb->addAction(m_actPng);
+
+    m_actSvg = new QAction("Export SVG", this);
+    connect(m_actSvg, &QAction::triggered, this, &MainWindow::exportSvg);
+    tb->addAction(m_actSvg);
 
     auto* fileMenu = menuBar()->addMenu("File");
-    fileMenu->addAction(actOpen);
-    fileMenu->addAction(actClone);
-    fileMenu->addAction(actRescan);
+    fileMenu->addAction(m_actOpen);
+    fileMenu->addAction(m_actClone);
+    fileMenu->addAction(m_actRescan);
     fileMenu->addSeparator();
-    fileMenu->addAction(actJson);
-    fileMenu->addAction(actCsv);
-    fileMenu->addAction(actPng);
-    fileMenu->addAction(actSvg);
+    fileMenu->addAction(m_actJson);
+    fileMenu->addAction(m_actCsv);
+    fileMenu->addAction(m_actPng);
+    fileMenu->addAction(m_actSvg);
     fileMenu->addSeparator();
 
     auto* actQuit = new QAction("Quit", this);
     connect(actQuit, &QAction::triggered, qApp, &QApplication::quit);
     fileMenu->addAction(actQuit);
+
+    auto* helpMenu = menuBar()->addMenu("Help");
+    auto* actAbout = new QAction("About", this);
+    connect(actAbout, &QAction::triggered, this, &MainWindow::showAbout);
+    helpMenu->addAction(actAbout);
 
     auto* central = new QWidget(this);
     setCentralWidget(central);
@@ -137,6 +175,17 @@ void MainWindow::buildUi()
     auto* root = new QVBoxLayout(central);
     root->setContentsMargins(0, 0, 0, 0);
     root->addWidget(splitter);
+}
+
+void MainWindow::showAbout()
+{
+    const QString text =
+        "DepGraph\n\n"
+        "Made by Samuel J. Tirwa.\n\n"
+        "A Qt6 desktop app that scans a repository folder for dependency manifests\n"
+        "and renders a dependency graph.\n";
+
+    QMessageBox::about(this, "About DepGraph", text);
 }
 
 void MainWindow::setRepoDir(const QDir& dir)
@@ -195,22 +244,41 @@ void MainWindow::rescan()
 
 void MainWindow::scanIntoGraph()
 {
-    QString err;
-    if (!DependencyScanner::scanRepositoryToGraph(m_repoDir, &m_graph, &err)) {
-        QMessageBox::warning(this, "Scan failed", err.isEmpty() ? "Unknown error" : err);
+    if (m_scanWatcher.isRunning())
         return;
+
+    setBusy(true, "Scanning...");
+
+    const QDir repo = m_repoDir;
+    auto fut = QtConcurrent::run([repo]() -> GraphModel::Data {
+        GraphModel tmp; // local builder; never returned by value
+        QString err;
+        (void)DependencyScanner::scanRepositoryToGraph(repo, &tmp, &err);
+        // Best-effort: errors are non-fatal today; tmp may be partially filled.
+        return tmp.toData();
+    });
+    m_scanWatcher.setFuture(fut);
+}
+
+void MainWindow::setBusy(bool busy, const QString& message)
+{
+    if (busy) {
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        statusBar()->showMessage(message.isEmpty() ? "Working..." : message);
+    } else {
+        QApplication::restoreOverrideCursor();
+        if (!message.isEmpty())
+            statusBar()->showMessage(message, 2500);
     }
 
-    const int nNodes = m_graph.nodes().size();
-    const int nEdges = m_graph.edges().size();
-
-    m_status->setText(QString("Repo: %1\nNodes: %2   Edges: %3")
-                          .arg(m_repoDir.absolutePath())
-                          .arg(nNodes)
-                          .arg(nEdges));
-
-    statusBar()->showMessage(QString("Scan complete. %1 nodes, %2 edges.").arg(nNodes).arg(nEdges), 3500);
-    applyFilter();
+    const bool en = !busy;
+    if (m_actOpen) m_actOpen->setEnabled(en);
+    if (m_actClone) m_actClone->setEnabled(en);
+    if (m_actRescan) m_actRescan->setEnabled(en);
+    if (m_actJson) m_actJson->setEnabled(en);
+    if (m_actCsv) m_actCsv->setEnabled(en);
+    if (m_actPng) m_actPng->setEnabled(en);
+    if (m_actSvg) m_actSvg->setEnabled(en);
 }
 
 QString MainWindow::defaultExportBaseName() const
@@ -349,4 +417,3 @@ void MainWindow::focusSelectedListItem()
     m_view->focusNode(nodeId);
     m_view->highlightImpactFrom(nodeId);
 }
-

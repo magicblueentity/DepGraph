@@ -13,7 +13,20 @@ class GraphModel : public QObject {
 public:
     explicit GraphModel(QObject* parent = nullptr);
 
+    struct Data {
+        QVector<Node> nodes;
+        QVector<Edge> edges;
+        QHash<QString, int> keyToId;
+        QHash<int, QSet<int>> out;
+        QHash<int, QSet<int>> in;
+    };
+
     void clear();
+    // Replace entire graph contents from another instance (used to apply results
+    // built in a worker thread onto the GUI-owned model).
+    void replaceFrom(const GraphModel& other);
+    void replaceFromData(const Data& data);
+    Data toData() const;
 
     int upsertNode(const QString& name, const QString& version, const QString& kind);
     void addEdge(int fromId, int toId);

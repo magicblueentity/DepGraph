@@ -24,16 +24,19 @@ public slots:
     void focusNode(int nodeId);
     void highlightImpactFrom(int nodeId);
     void clearHighlight();
+    void fitToContents();
+    void resetView();
+    void relayout();
 
 protected:
     void wheelEvent(QWheelEvent* e) override;
     void mousePressEvent(QMouseEvent* e) override;
     void mouseMoveEvent(QMouseEvent* e) override;
     void mouseReleaseEvent(QMouseEvent* e) override;
+    void keyPressEvent(QKeyEvent* e) override;
 
 private slots:
     void rebuildScene();
-    void tickLayout();
 
 private:
     class NodeItem;
@@ -41,11 +44,11 @@ private:
 
     void fitInitial();
     QColor colorForStatus(NodeStatus s) const;
+    void updateEdges();
+    void applyInitialLayout();
 
     GraphModel* m_model = nullptr;
     QGraphicsScene* m_scene = nullptr;
-
-    QTimer m_layoutTimer;
 
     QHash<int, NodeItem*> m_nodeItems;
     QVector<EdgeItem*> m_edgeItems;
@@ -54,4 +57,5 @@ private:
     QPoint m_panStart;
 
     QSet<int> m_highlighted;
+    qreal m_zoom = 1.0;
 };

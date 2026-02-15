@@ -16,6 +16,39 @@ void GraphModel::clear()
     emit changed();
 }
 
+void GraphModel::replaceFrom(const GraphModel& other)
+{
+    if (this == &other)
+        return;
+    m_nodes = other.m_nodes;
+    m_edges = other.m_edges;
+    m_keyToId = other.m_keyToId;
+    m_out = other.m_out;
+    m_in = other.m_in;
+    emit changed();
+}
+
+void GraphModel::replaceFromData(const Data& data)
+{
+    m_nodes = data.nodes;
+    m_edges = data.edges;
+    m_keyToId = data.keyToId;
+    m_out = data.out;
+    m_in = data.in;
+    emit changed();
+}
+
+GraphModel::Data GraphModel::toData() const
+{
+    Data d;
+    d.nodes = m_nodes;
+    d.edges = m_edges;
+    d.keyToId = m_keyToId;
+    d.out = m_out;
+    d.in = m_in;
+    return d;
+}
+
 int GraphModel::ensureNodeId(const QString& name, const QString& kind)
 {
     const QString key = kind + ":" + name.trimmed();
